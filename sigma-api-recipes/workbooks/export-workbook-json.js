@@ -1,18 +1,27 @@
-// require('dotenv').config({ path: 'sigma-api-recipes/.env' });
-
 const axios = require('axios');
 const fs = require('fs');
 const path = require('path');
+
+// Replace with your actual function to get a bearer token
 const getBearerToken = require('../get-access-token');
 
-const baseURL = 'https://api.sigmacomputing.com/v2';
-const workbookId = '29z2Jg1ww2LXiYd6BVeOh3'; // Replace with your actual workbook ID
+const baseURL = 'https://aws-api.sigmacomputing.com/v2';
 
-async function initiateExport(accessToken) {
+async function listAllWorkbooks(accessToken) {
+    try {
+        const response = await axios.get(`${baseURL}/workbooks`, {
+            headers: { Authorization: `Bearer ${accessToken}` }
+        });
+        return response.data.workbooks.map(wb => ({ id: wb.id, name: wb.name }));
+    } catch (error) {
+        console.error('Error fetching workbooks:', error.response ? error.response.data : error.message);
+        return [];
+    }
+}
+
+async function initiateExport(workbookId, accessToken) {
     const exportOptions = {
-        format: { type: 'json' },
-        useAsynchronously: true,
-        rowLimit: 1000000 // Optional: adjust based on expected data size
+        format: { type: 'pdf', layout: 'portrait' }
     };
 
     try {
@@ -26,16 +35,14 @@ async function initiateExport(accessToken) {
                 }
             }
         );
-        console.log('Export initiated:', response.data);
         return response.data.queryId;
     } catch (error) {
-        console.error('Failed to initiate export:', error.response?.data || error.message);
+        console.error(`Failed to initiate export for workbook ${workbookId}:`, error.response ? error.response.data : error.message);
         return null;
     }
 }
 
 async function checkExportReady(queryId, accessToken) {
-    console.log(`Polling for export readiness: ${queryId}`);
     while (true) {
         try {
             const response = await axios.get(
@@ -47,15 +54,17 @@ async function checkExportReady(queryId, accessToken) {
             );
 
             if (response.status === 200) {
-                console.log('Export is ready.');
                 return response.data;
+            } else {
+                console.log(`Waiting for export to be ready. Status: ${response.status}`);
+                await new Promise(resolve => setTimeout(resolve, 10000));
             }
         } catch (error) {
-            if (error.response?.status === 204) {
+            if (error.response && error.response.status === 204) {
                 console.log('Export not ready yet. Retrying in 10 seconds...');
                 await new Promise(resolve => setTimeout(resolve, 10000));
             } else {
-                console.error('Error checking export status:', error.response?.data || error.message);
+                console.error('Error checking export status:', error.response ? error.response.data : error.message);
                 return null;
             }
         }
@@ -68,32 +77,46 @@ async function downloadExport(data, filename) {
 
     return new Promise((resolve, reject) => {
         data.pipe(writer);
-        writer.on('error', reject);
+        writer.on('error', err => {
+            writer.close();
+            reject(err);
+        });
         writer.on('finish', () => {
-            console.log(`Export saved to ${filePath}`);
+            console.log(`Export downloaded successfully to: ${filePath}`);
             resolve(true);
         });
     });
 }
 
-async function exportWorkflow() {
+async function exportAllWorkbooks() {
     const accessToken = await getBearerToken();
     if (!accessToken) {
-        console.error('Could not retrieve access token.');
+        console.error('Failed to obtain bearer token.');
         return;
     }
 
-    const queryId = await initiateExport(accessToken);
-    if (!queryId) return;
-
-    const data = await checkExportReady(queryId, accessToken);
-    if (data) {
-        await downloadExport(data, 'WorkbookExport.json');
-    } else {
-        console.error('Export failed or timed out.');
+    const workbooks = await listAllWorkbooks(accessToken);
+    if (workbooks.length === 0) {
+        console.log('No workbooks found to export.');
+        return;
     }
 
-    process.exit(0);
+    for (const workbook of workbooks) {
+        console.log(`Starting export for workbook: ${workbook.name} (ID: ${workbook.id})`);
+        const queryId = await initiateExport(workbook.id, accessToken);
+        if (!queryId) {
+            console.error(`Skipping workbook ${workbook.name} due to export initiation failure.`);
+            continue;
+        }
+
+        const data = await checkExportReady(queryId, accessToken);
+        if (data) {
+            const safeName = workbook.name.replace(/[^a-z0-9]/gi, '_').toLowerCase();
+            await downloadExport(data, `${safeName}_${workbook.id}.pdf`);
+        } else {
+            console.error(`Failed to download export for workbook ${workbook.name}.`);
+        }
+    }
 }
 
-exportWorkflow();
+exportAllWorkbooks();

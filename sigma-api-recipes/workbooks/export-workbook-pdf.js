@@ -110,7 +110,7 @@ async function exportWorkflow() {
 
     const data = await checkExportReady(queryId, accessToken);
     if (data) {
-        await downloadExport(data, 'Test_Workbook_Suma');
+        await downloadExport(data, 'Test_Workbook_Suma.pdf');
     } else {
         console.error('Failed to prepare the export for download.');
     }
